@@ -470,6 +470,27 @@ print(result.output)
 
 _(This example is complete, it can be run "as is")_
 
+#### Partial validation during streaming {#partial-validation}
+
+When [streaming responses](#streaming-model-responses), output validators are called multiple times - once for each partial response and once for the final response. By default, validators receive `allow_partial=False`, meaning they treat all responses the same way.
+
+However, you can add a `partial: bool` parameter as the last argument to your validator to distinguish between partial and final validation. This is useful when you want to skip expensive validation during streaming but apply full validation to the final result:
+
+```python
+from pydantic_ai import Agent, ModelRetry
+
+agent = Agent('openai:gpt-4o')
+
+@agent.output_validator
+def validate_output(ctx: RunContext, output: str, partial: bool) -> str:
+    if partial:
+        return output
+    else:
+        if 'invalid' in output:
+            raise ModelRetry('Output contains invalid content')
+        return output
+```
+
 ## Image output
 
 Some models can generate images as part of their response, for example those that support the [Image Generation built-in tool](builtin-tools.md#image-generation-tool) and OpenAI models using the [Code Execution built-in tool](builtin-tools.md#code-execution-tool) when told to generate a chart.

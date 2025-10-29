@@ -54,7 +54,9 @@ resolve these potential variance issues.
 """
 
 OutputValidatorFunc = (
-    Callable[[RunContext[AgentDepsT], OutputDataT_inv], OutputDataT_inv]
+    Callable[[RunContext[AgentDepsT], OutputDataT_inv, bool], OutputDataT_inv]
+    | Callable[[RunContext[AgentDepsT], OutputDataT_inv, bool], Awaitable[OutputDataT_inv]]
+    | Callable[[RunContext[AgentDepsT], OutputDataT_inv], OutputDataT_inv]
     | Callable[[RunContext[AgentDepsT], OutputDataT_inv], Awaitable[OutputDataT_inv]]
     | Callable[[OutputDataT_inv], OutputDataT_inv]
     | Callable[[OutputDataT_inv], Awaitable[OutputDataT_inv]]
@@ -63,6 +65,7 @@ OutputValidatorFunc = (
 A function that always takes and returns the same type of data (which is the result type of an agent run), and:
 
 * may or may not take [`RunContext`][pydantic_ai.tools.RunContext] as a first argument
+* may or may not take a `partial: bool` parameter as a last argument
 * may or may not be async
 
 Usage `OutputValidatorFunc[AgentDepsT, T]`.
@@ -162,10 +165,13 @@ async def execute_traced_output_function(
 class OutputValidator(Generic[AgentDepsT, OutputDataT_inv]):
     function: OutputValidatorFunc[AgentDepsT, OutputDataT_inv]
     _takes_ctx: bool = field(init=False)
+    _takes_partial: bool = field(init=False)
     _is_async: bool = field(init=False)
 
     def __post_init__(self):
-        self._takes_ctx = len(inspect.signature(self.function).parameters) > 1
+        sig = inspect.signature(self.function)
+        self._takes_ctx = len(sig.parameters) > 1
+        self._takes_partial = len(sig.parameters) > 2
         self._is_async = _utils.is_async_callable(self.function)
 
     async def validate(
@@ -173,6 +179,7 @@ class OutputValidator(Generic[AgentDepsT, OutputDataT_inv]):
         result: T,
         run_context: RunContext[AgentDepsT],
         wrap_validation_errors: bool = True,
+        allow_partial: bool = False,
     ) -> T:
         """Validate a result but calling the function.
 
@@ -180,6 +187,7 @@ class OutputValidator(Generic[AgentDepsT, OutputDataT_inv]):
             result: The result data after Pydantic validation the message content.
             run_context: The current run context.
             wrap_validation_errors: If true, wrap the validation errors in a retry message.
+            allow_partial: Whether partial validation is allowed (passed to validator if it accepts it).
 
         Returns:
             Result of either the validated result data (ok) or a retry message (Err).
@@ -188,6 +196,9 @@ class OutputValidator(Generic[AgentDepsT, OutputDataT_inv]):
             args = run_context, result
         else:
             args = (result,)
+
+        if self._takes_partial:
+            args = (*args, allow_partial)
 
         try:
             if self._is_async:
@@ -1064,11 +1075,16 @@ class OutputToolset(AbstractToolset[AgentDepsT]):
         }
 
     async def call_tool(
-        self, name: str, tool_args: dict[str, Any], ctx: RunContext[AgentDepsT], tool: ToolsetTool[AgentDepsT]
+        self,
+        name: str,
+        tool_args: dict[str, Any],
+        ctx: RunContext[AgentDepsT],
+        tool: ToolsetTool[AgentDepsT],
+        allow_partial: bool = False,
     ) -> Any:
         output = await self.processors[name].call(tool_args, ctx, wrap_validation_errors=False)
         for validator in self.output_validators:
-            output = await validator.validate(output, ctx, wrap_validation_errors=False)
+            output = await validator.validate(output, ctx, wrap_validation_errors=False, allow_partial=allow_partial)
         return output
 
 
