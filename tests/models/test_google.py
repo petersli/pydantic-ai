@@ -5102,6 +5102,134 @@ async def test_google_api_non_http_error(
     assert exc_info.value.model_name == 'gemini-1.5-flash'
 
 
+@pytest.mark.parametrize(
+    'error_class,error_response,expected_status',
+    [
+        (
+            errors.ClientError,
+            {'error': {'code': 429, 'message': 'Resource exhausted', 'status': 'RESOURCE_EXHAUSTED'}},
+            429,
+        ),
+        (
+            errors.ServerError,
+            {'error': {'code': 503, 'message': 'The service is currently unavailable.', 'status': 'UNAVAILABLE'}},
+            503,
+        ),
+    ],
+)
+async def test_google_stream_api_errors_on_first_chunk(
+    allow_model_requests: None,
+    google_provider: GoogleProvider,
+    mocker: MockerFixture,
+    error_class: Any,
+    error_response: dict[str, Any],
+    expected_status: int,
+):
+    """Test that API errors raised on the first streamed chunk (during peek) are wrapped in ModelHTTPError."""
+    model = GoogleModel('gemini-1.5-flash', provider=google_provider)
+    mocked_error = error_class(expected_status, error_response)
+
+    async def failing_stream():
+        raise mocked_error
+        yield  # pragma: no cover
+
+    mocker.patch.object(model.client.aio.models, 'generate_content_stream', return_value=failing_stream())
+
+    agent = Agent(model=model)
+
+    with pytest.raises(ModelHTTPError) as exc_info:
+        async with agent.run_stream('This prompt will trigger the mocked error.'):
+            pass  # pragma: no cover
+
+    assert exc_info.value.status_code == expected_status
+    assert error_response['error']['message'] in str(exc_info.value.body)
+
+
+@pytest.mark.parametrize(
+    'error_class,error_response,expected_status',
+    [
+        (
+            errors.ClientError,
+            {'error': {'code': 429, 'message': 'Resource exhausted', 'status': 'RESOURCE_EXHAUSTED'}},
+            429,
+        ),
+        (
+            errors.ServerError,
+            {'error': {'code': 503, 'message': 'The service is currently unavailable.', 'status': 'UNAVAILABLE'}},
+            503,
+        ),
+    ],
+)
+async def test_google_stream_api_errors_mid_stream(
+    allow_model_requests: None,
+    google_provider: GoogleProvider,
+    mocker: MockerFixture,
+    error_class: Any,
+    error_response: dict[str, Any],
+    expected_status: int,
+):
+    """Test that API errors raised during stream iteration (after the first chunk) are wrapped in ModelHTTPError."""
+    model = GoogleModel('gemini-1.5-flash', provider=google_provider)
+    mocked_error = error_class(expected_status, error_response)
+
+    first_chunk = mocker.Mock(
+        candidates=[
+            mocker.Mock(
+                content=mocker.Mock(parts=[mocker.Mock(text='Hello', thought=False, thought_signature=None, function_call=None, inline_data=None, executable_code=None, code_execution_result=None, function_response=None)]),
+                finish_reason=None,
+                safety_ratings=None,
+                grounding_metadata=None,
+                url_context_metadata=None,
+            )
+        ],
+        model_version='gemini-1.5-flash',
+        usage_metadata=None,
+        create_time=None,
+        response_id='resp_123',
+        prompt_feedback=None,
+    )
+
+    async def stream_then_fail():
+        yield first_chunk
+        raise mocked_error
+
+    mocker.patch.object(model.client.aio.models, 'generate_content_stream', return_value=stream_then_fail())
+
+    agent = Agent(model=model)
+
+    with pytest.raises(ModelHTTPError) as exc_info:
+        async with agent.run_stream('This prompt will trigger the mocked error.') as result:
+            async for _chunk in result.stream_text():
+                pass  # pragma: no cover
+
+    assert exc_info.value.status_code == expected_status
+    assert error_response['error']['message'] in str(exc_info.value.body)
+
+
+async def test_google_stream_non_http_api_error(
+    allow_model_requests: None,
+    google_provider: GoogleProvider,
+    mocker: MockerFixture,
+):
+    """Test that non-HTTP API errors raised during stream iteration are wrapped in ModelAPIError."""
+    model = GoogleModel('gemini-1.5-flash', provider=google_provider)
+    mocked_error = errors.APIError(302, {'error': {'code': 302, 'message': 'Redirect', 'status': 'REDIRECT'}})
+
+    async def failing_stream():
+        raise mocked_error
+        yield  # pragma: no cover
+
+    mocker.patch.object(model.client.aio.models, 'generate_content_stream', return_value=failing_stream())
+
+    agent = Agent(model=model)
+
+    with pytest.raises(ModelAPIError) as exc_info:
+        async with agent.run_stream('This prompt will trigger the mocked error.'):
+            pass  # pragma: no cover
+
+    assert exc_info.value.model_name == 'gemini-1.5-flash'
+
+
 async def test_google_model_retrying_after_empty_response(allow_model_requests: None, google_provider: GoogleProvider):
     message_history = [
         ModelRequest(parts=[UserPromptPart(content='Hi')], timestamp=IsDatetime()),
